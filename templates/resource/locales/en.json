@@ -1,0 +1,7 @@
+{
+  "reward_claimed": "You claimed your reward.",
+  "inventory_full": "You can't carry that.",
+  "rate_limited": "Slow down.",
+  "timeout": "The server didn't respond, try again.",
+  "try_again": "Something went wrong, try again."
+}

@@ -1,0 +1,3 @@
+-- ox_fuel: the fuel is the car's `fuel` state bag, which its client applies to the car.
+local provider, shared = ...
+return shared.stateClient()

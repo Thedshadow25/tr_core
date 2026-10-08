@@ -1,0 +1,3 @@
+-- No fuel script: the fuel is only tracked in the car's `fuel` state bag, full until something takes some.
+local provider, shared = ...
+return shared.stateServer(100.0)

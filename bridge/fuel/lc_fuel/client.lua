@@ -1,0 +1,3 @@
+-- lc_fuel: client exports GetFuel / SetFuel (fuel in the _FUEL_LEVEL decorator).
+local provider, shared = ...
+return shared.exportsClient('lc_fuel')

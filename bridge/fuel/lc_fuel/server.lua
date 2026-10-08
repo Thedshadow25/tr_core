@@ -1,0 +1,3 @@
+-- lc_fuel: client only; the module asks the car's owner.
+local provider, shared = ...
+return shared.exportsServer()
