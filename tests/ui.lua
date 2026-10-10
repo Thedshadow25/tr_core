@@ -38,9 +38,9 @@ end
 TR.ui.menu.register('tr_fraud:atm', {
     title = 'Which card?',
     items = {
-        { label = 'Maze Bank 1234', args = 4, onSelect = record('pick') },
+        { label = 'Maze Bank 1234', icon = 'credit-card', args = 4, onSelect = record('pick') },
         { label = 'Boom', onSelect = function() error('script bug') end },
-        { label = 'Fleeca 9876', args = 7, close = true, onSelect = record('pick') },
+        { label = 'Fleeca 9876', icon = 5, args = 7, close = true, onSelect = record('pick') },
     },
     onClose = record('close'),
 })
@@ -55,7 +55,8 @@ check('own: menu takes focus', T.focus[1] == true and T.focus[2] == true)
 T.nui('tr:ready')
 local open = T.lastNui('menu:open')
 check('own: sent once ready', open ~= nil and open.data.title == 'Which card?' and open.data.id == 'tr_fraud:atm')
-check('own: only labels go to the page', #open.data.items == 3 and open.data.items[1].label == 'Maze Bank 1234' and open.data.items[1].onSelect == nil)
+check('own: only labels and icons go to the page', #open.data.items == 3 and open.data.items[1].label == 'Maze Bank 1234' and open.data.items[1].onSelect == nil)
+check('own: icons go to the page, bad ones are dropped', open.data.items[1].icon == 'credit-card' and open.data.items[2].icon == nil and open.data.items[3].icon == nil)
 T.nui('tr:ready')
 check('own: ready twice sends nothing twice', count('menu:open') == 1)
 
@@ -110,6 +111,33 @@ TR.ui.textui.hide('tr_fraud:atm')
 TR.ui.textui.hide('tr_fraud:atm')
 check('own: prompt hidden once', not TR.ui.textui.isShown('tr_fraud:atm') and count('textui:hide') == 1)
 
+TR.ui.sound.register({
+    fr_beep = { files = { 'sounds/beep.wav' }, level = 0.6, variance = 0.05 },
+    fr_slide = { files = { 'sounds/slide.ogg', 'sounds/../../x.wav', 'notes.txt' }, loop = true },
+    fr_none = { files = { 'readme.md' } },
+})
+local reg = T.lastNui('sound:register')
+check('own: its sounds go to its page, only files it can play', reg and reg.data.resource == 'tr_fraud'
+    and reg.data.sounds.fr_beep.files[1] == 'sounds/beep.wav' and reg.data.sounds.fr_beep.level == 0.6
+    and reg.data.sounds.fr_beep.variance == 0.05 and #reg.data.sounds.fr_slide.files == 1
+    and reg.data.sounds.fr_slide.files[1] == 'sounds/slide.ogg' and reg.data.sounds.fr_slide.loop == true
+    and reg.data.sounds.fr_none == nil)
+TR.ui.sound.play('fr_beep', 0.5)
+local played = T.lastNui('sound:play')
+check('own: played on its page', played and played.data.name == 'fr_beep' and played.data.volume == 0.5)
+TR.ui.sound.loop('fr:slide', 'fr_slide', { level = 0.3 })
+TR.ui.sound.loop('fr:slide', 'fr_slide', { level = 0.3 })
+check('own: a loop on its page, sent once while it stays the same', count('sound:loop') == 1
+    and T.lastNui('sound:loop').data.id == 'fr:slide' and T.lastNui('sound:loop').data.params.level == 0.3)
+for _, fn in ipairs(T.handlers.onClientResourceStart or {}) do fn('tr_ui') end
+TR.ui.sound.loop('fr:slide', 'fr_slide', { level = 0.3 })
+check('own: tr_ui starting doesn\'t restart it', count('sound:loop') == 1)
+TR.ui.sound.stop('fr:slide')
+TR.ui.sound.stop('fr:slide')
+check('own: stopped once', count('sound:stop') == 1 and T.lastNui('sound:stop').data.id == 'fr:slide')
+local okTick, tickErr = pcall(TR.ui.sound.play, 'tick')
+check('own: tr_ui\'s own sounds still need tr_ui', not okTick and tostring(tickErr):find('tr_ui is not running', 1, true) ~= nil)
+
 TR.ui.menu.show('tr_fraud:atm')
 for _, fn in ipairs(T.handlers.onResourceStop or {}) do fn('tr_fraud') end
 check('own: stopping with the menu open gives focus back', T.focus[1] == false)
@@ -127,6 +155,12 @@ TR.ui.menu.register('tr_minigames:x', { title = 'X', items = {} })
 TR.ui.hud.set({ hint = { text = 'Pick the lock' } })
 check('no page: goes to tr_ui', #sent == 2 and sent[1].name == 'registerMenu' and sent[2].name == 'setHud')
 check('no page: takes no NUI callbacks', next(T.nuiCallbacks) == nil and #T.nuiMessages == 0)
+sent = {}
+TR.ui.sound.register({ mg_beep = { files = { 'sounds/beep.wav' } } })
+TR.ui.sound.play('mg_beep')
+TR.ui.sound.play('tick')
+check('no page: its sounds and tr_ui\'s go to tr_ui', #sent == 3 and sent[1].name == 'registerSounds' and sent[2].name == 'playSound'
+    and sent[2].args[1] == 'mg_beep' and sent[3].args[1] == 'tick' and #T.nuiMessages == 0)
 
 boot('tr_minigames', {})
 local ok, err = pcall(TR.ui.hud.set, { hint = { text = 'x' } })

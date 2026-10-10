@@ -60,7 +60,7 @@ end
 
 ---@param length number metres
 ---@param spacing number metres between nodes (rounded so they fit the length)
----@param opts? { radius?: number, bend?: number, damping?: number, friction?: number, iterations?: integer, substeps?: integer, collideEvery?: integer }
+---@param opts? { radius?: number, bend?: number, damping?: number, friction?: number, iterations?: integer, substeps?: integer, collideEvery?: integer, follow?: boolean }
 function Rope.new(length, spacing, opts)
     opts = opts or {}
     local count = math.max(3, math.floor(length / spacing + 0.5) + 1)
@@ -75,6 +75,7 @@ function Rope.new(length, spacing, opts)
         iterations = opts.iterations or 10,
         substeps = opts.substeps or 2,
         collideEvery = opts.collideEvery or 1, -- colliders every n-th iteration (and the last): cheaper
+        follow = opts.follow or false,   -- the cheap solver (followSolve) instead of verletSolve
         p = {},
         prev = {},
         pins = {},       -- [node] = position it is held at
@@ -144,17 +145,6 @@ function Rope:holds()
     return fixed
 end
 
-local function satisfy(p, a, b, rest, wa, wb, k)
-    local d = p[b] - p[a]
-    local len = #d
-    if len < 1e-9 then return end
-    local w = wa + wb
-    if w <= 0.0 then return end
-    local move = d * ((len - rest) / len * k / w)
-    if wa > 0.0 then p[a] = p[a] + move * wa end
-    if wb > 0.0 then p[b] = p[b] - move * wb end
-end
-
 ---Pushes every free node out of the colliders. `last`: remember which ones touched (for friction).
 function Rope:collide(fixed, last)
     local p, r = self.p, self.radius
@@ -162,12 +152,38 @@ function Rope:collide(fixed, last)
     for i = 1, self.count do
         if not fixed[i] then
             local touched = false
-            for _, collide in ipairs(colliders) do
-                local q, hit = collide(p[i], r)
+            for c = 1, #colliders do
+                local q, hit = colliders[c](p[i], r)
                 if q then p[i] = q end
                 touched = touched or hit
             end
             if last then self.touching[i] = touched end
+        end
+    end
+end
+
+---The middle of each link out of the colliders too (followSolve): nodes a few centimetres apart can sit
+---either side of a thin edge (a funnel's rim) with the hose between them through it. A link whose middle
+---is in something moves out with it, both ends (or the free one twice as far).
+function Rope:collideLinks(fixed)
+    local p, r = self.p, self.radius
+    local colliders = self.active or self.colliders
+    for i = 1, self.count - 1 do
+        local fa, fb = not fixed[i], not fixed[i + 1]
+        if fa or fb then
+            local m = (p[i] + p[i + 1]) * 0.5
+            local q = m
+            for c = 1, #colliders do q = colliders[c](q, r) or q end
+            if q ~= m then
+                local d = q - m
+                if fa and fb then
+                    p[i], p[i + 1] = p[i] + d, p[i + 1] + d
+                elseif fa then
+                    p[i] = p[i] + d * 2.0
+                else
+                    p[i + 1] = p[i + 1] + d * 2.0
+                end
+            end
         end
     end
 end
@@ -185,6 +201,167 @@ local function sameHolds(a, b, n, tolerance)
         if x and #(x - y) > tolerance then return false end
     end
     return true
+end
+
+---The usual way: Verlet steps in substeps, the constraints solved `iterations` times each.
+function Rope:verletSolve(fixed, fall, keep)
+    local p, prev, n = self.p, self.prev, self.count
+    local seg, bendRest = self.seg, self.seg * 2
+    -- The constraints, written out here (no call per pair; this is most of the cost): each pulls its
+    -- two nodes back towards `rest` apart, `k` of the way, split between the free ones.
+    local free = self.free or {}
+    self.free = free
+    for i = 1, n do free[i] = not fixed[i] end
+    local touching, slide = self.touching, 1.0 - self.friction
+    local iterations, collideEvery = self.iterations, self.collideEvery
+    local bend = self.bend > 0.0
+    local bendK = self.bend * 0.5
+
+    for _ = 1, self.substeps do
+        for i = 1, n do
+            if fixed[i] then
+                p[i], prev[i] = fixed[i], fixed[i]
+            else
+                local now = p[i]
+                local v = (now - prev[i]) * keep
+                if touching[i] then v = vec3(v.x * slide, v.y * slide, v.z) end
+                prev[i] = now
+                p[i] = now + v + fall
+            end
+        end
+
+        for it = 1, iterations do
+            for i = 1, n - 1 do
+                local fa, fb = free[i], free[i + 1]
+                if fa or fb then
+                    local a, b = p[i], p[i + 1]
+                    local d = b - a
+                    local len = #d
+                    if len >= 1e-9 then
+                        if fa and fb then
+                            local move = d * ((len - seg) / len / 2.0)
+                            p[i], p[i + 1] = a + move, b - move
+                        elseif fa then
+                            p[i] = a + d * ((len - seg) / len)
+                        else
+                            p[i + 1] = b - d * ((len - seg) / len)
+                        end
+                    end
+                end
+            end
+            if bend then
+                for i = 1, n - 2 do
+                    local fa, fb = free[i], free[i + 2]
+                    if fa or fb then
+                        local a, b = p[i], p[i + 2]
+                        local d = b - a
+                        local len = #d
+                        if len >= 1e-9 then
+                            if fa and fb then
+                                local move = d * ((len - bendRest) / len * bendK / 2.0)
+                                p[i], p[i + 2] = a + move, b - move
+                            elseif fa then
+                                p[i] = a + d * ((len - bendRest) / len * bendK)
+                            else
+                                p[i + 2] = b - d * ((len - bendRest) / len * bendK)
+                            end
+                        end
+                    end
+                end
+            end
+            local last = it == iterations
+            if last or it % collideEvery == 0 then self:collide(fixed, last) end
+        end
+    end
+end
+
+---The cheap way (opts.follow): one step, no substeps, no iterations. The free nodes move on as they
+---were going and fall, are smoothed once for its stiffness, then the chain is pulled back to its length
+---from what holds it (follow the leader: out from a held node along a loose end, and both ways between
+---two held nodes) and pushed out of the colliders once. The speed the pulling takes off a loose end is
+---given back (Dynamic Follow-The-Leader, Mueller et al. 2012), else it would hang and fall in slow motion.
+---About a sixth of verletSolve's work.
+local CORRECT = 0.9 -- of the pull on the next node out given back to a node's speed
+local SPAN_PASSES = 3 -- both ways between two held nodes and the colliders, each step
+
+function Rope:followSolve(fixed, dt)
+    local p, prev, n, seg = self.p, self.prev, self.count, self.seg
+    local fall = vec3(0.0, 0.0, GRAVITY * dt * dt)
+    local keep, slide, touching = 1.0 - self.damping, 1.0 - self.friction, self.touching
+    local held, count = self.heldList or {}, 0
+    self.heldList = held
+
+    for i = 1, n do
+        if fixed[i] then
+            p[i], prev[i] = fixed[i], fixed[i]
+            count = count + 1
+            held[count] = i
+        else
+            local now = p[i]
+            local v = (now - prev[i]) * keep
+            if touching[i] then v = vec3(v.x * slide, v.y * slide, v.z) end
+            prev[i] = now
+            p[i] = now + v + fall
+        end
+    end
+    for k = count + 1, #held do held[k] = nil end
+
+    -- Stiffness: each free node a little towards the middle of its neighbours.
+    local bend = self.bend * 0.5
+    if bend > 0.0 then
+        for i = 2, n - 1 do
+            if not fixed[i] then p[i] = p[i] + ((p[i - 1] + p[i + 1]) * 0.5 - p[i]) * bend end
+        end
+    end
+
+    -- Node i put `seg` from node j, the way it is from it now. Returns how far i was moved.
+    local function follow(i, j)
+        local d = p[i] - p[j]
+        local len = #d
+        if len <= 1e-9 then return nil end
+        local to = p[j] + d * (seg / len)
+        local moved = to - p[i]
+        p[i] = to
+        return moved
+    end
+    -- A loose end from node `from` outwards (step +1 or -1): node i's speed gets back what pulling the
+    -- next node out cost it.
+    local function tail(from, to, step)
+        local last
+        for i = from, to, step do
+            local moved = follow(i, i - step)
+            if last and moved then prev[i - step] = prev[i - step] + moved * CORRECT end
+            last = moved
+        end
+    end
+    if count == 0 then
+        tail(2, n, 1)
+    else
+        if held[1] > 1 then tail(held[1] - 1, 1, -1) end
+        if held[count] < n then tail(held[count] + 1, n, 1) end
+    end
+
+    -- Between two held nodes, both ways (FABRIK) and out of the colliders, a few times: once each way leaves
+    -- all of the error in one link, and colliders pushing it over an edge last would stretch that link.
+    local spans = false
+    for k = 1, count - 1 do
+        if held[k + 1] > held[k] + 1 then spans = true end
+    end
+    if spans then
+        for pass = 1, SPAN_PASSES do
+            for k = 1, count - 1 do
+                local a, b = held[k], held[k + 1]
+                if b > a + 1 then
+                    for i = a + 1, b - 1 do follow(i, i - 1) end
+                    for i = b - 1, a + 1, -1 do follow(i, i + 1) end
+                end
+            end
+            if pass < SPAN_PASSES then self:collide(fixed, false) end
+        end
+    end
+
+    self:collideLinks(fixed)
+    self:collide(fixed, true)
 end
 
 ---Moves the rope on by dt seconds.
@@ -229,31 +406,10 @@ function Rope:step(dt)
         self.active = select(box)
     end
 
-    for _ = 1, self.substeps do
-        for i = 1, n do
-            if fixed[i] then
-                p[i], prev[i] = fixed[i], fixed[i]
-            else
-                local now = p[i]
-                local v = (now - prev[i]) * keep
-                if self.touching[i] then v = vec3(v.x * (1.0 - self.friction), v.y * (1.0 - self.friction), v.z) end
-                prev[i] = now
-                p[i] = now + v + fall
-            end
-        end
-
-        for it = 1, self.iterations do
-            for i = 1, n - 1 do
-                satisfy(p, i, i + 1, seg, fixed[i] and 0.0 or 1.0, fixed[i + 1] and 0.0 or 1.0, 1.0)
-            end
-            if self.bend > 0.0 then
-                for i = 1, n - 2 do
-                    satisfy(p, i, i + 2, bendRest, fixed[i] and 0.0 or 1.0, fixed[i + 2] and 0.0 or 1.0, self.bend * 0.5)
-                end
-            end
-            local last = it == self.iterations
-            if last or it % self.collideEvery == 0 then self:collide(fixed, last) end
-        end
+    if self.follow then
+        self:followSolve(fixed, dt)
+    else
+        self:verletSolve(fixed, fall, keep)
     end
 
     -- Settled (or done settling): asleep until what holds it moves.

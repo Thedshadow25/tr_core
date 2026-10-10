@@ -166,6 +166,7 @@ function Scene:createCamera(pos, target, fov)
     self.camGoalPos, self.camGoalTarget, self.fovGoal = pos, target, fov
     self.camSpeed = 2.6
     self.cam = CreateCam('DEFAULT_SCRIPTED_CAMERA', true)
+    self.camSet = nil -- a new camera: set it whatever the last one was set to
 
     self:updateCamera()
     RenderScriptCams(true, false, 0, true, false)
@@ -182,11 +183,21 @@ function Scene:cameraSettled()
     return Vec.length(self.camPos - self.camGoalPos) < 0.01
 end
 
+---Eases the camera towards its goal and sets it. There (to a tenth of a millimetre) it stops instead of
+---creeping closer every frame, and a camera that hasn't moved (nor has the entity) isn't set again.
 function Scene:updateCamera()
-    local k = clamp(GetFrameTime() * self.camSpeed, 0.0, 1.0)
-    self.camPos = Vec.lerp(self.camPos, self.camGoalPos, k)
-    self.camTarget = Vec.lerp(self.camTarget, self.camGoalTarget, k)
-    self.fov = lerp(self.fov, self.fovGoal, k)
+    if #(self.camPos - self.camGoalPos) < 0.0001 and #(self.camTarget - self.camGoalTarget) < 0.0001
+        and math.abs(self.fov - self.fovGoal) < 0.001 then
+        self.camPos, self.camTarget, self.fov = self.camGoalPos, self.camGoalTarget, self.fovGoal
+    else
+        local k = clamp(GetFrameTime() * self.camSpeed, 0.0, 1.0)
+        self.camPos = Vec.lerp(self.camPos, self.camGoalPos, k)
+        self.camTarget = Vec.lerp(self.camTarget, self.camGoalTarget, k)
+        self.fov = lerp(self.fov, self.fovGoal, k)
+    end
+    local set = self.camSet
+    if set and set.pos == self.camPos and set.target == self.camTarget and set.fov == self.fov and not self.moved then return end
+    self.camSet = { pos = self.camPos, target = self.camTarget, fov = self.fov }
     self.camRot = Mat.look(self.camTarget - self.camPos, UP)
 
     local world = self:toWorld(self.camPos)

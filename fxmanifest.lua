@@ -6,7 +6,7 @@ use_experimental_fxv2_oal 'yes'
 name 'tr_core'
 author 'TR Scripts'
 description 'Shared core library for TR Scripts'
-version '1.1.0'
+version '1.2.0'
 
 shared_script 'init.lua'
 server_script 'server/main.lua'

@@ -24,7 +24,7 @@
 ---@field db TRDb server only
 ---@field target TRTarget client only
 ---@field cache TRCache client only
----@field ui TRUi client only (menus and HUD on the resource's own page, else tr_ui; sounds need tr_ui)
+---@field ui TRUi client only (menus, HUD and its own sounds on the resource's own page, else tr_ui; tr_ui's sounds need tr_ui)
 ---@field math TRMath shared: rotation maths (Mat, Vec)
 ---@field scene TRScene client only: 3D props on an entity, camera, picking
 ---@field rope TRRope shared: simulated rope / hose

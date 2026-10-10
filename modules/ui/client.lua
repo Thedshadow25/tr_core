@@ -3,7 +3,8 @@
 
     A resource with its own page (ui_page in its fxmanifest) gets its menus, HUD and prompts drawn there:
     the page mounts <Overlays /> from @tr/ui (dev/ui-kit), and the resource doesn't need tr_ui. Resources
-    without a page use tr_ui's. Sounds and probeFrame always come from tr_ui.
+    without a page use tr_ui's. The sounds a resource ships (TR.ui.sound.register) play on its own page
+    too; tr_ui's own sounds and probeFrame always come from tr_ui.
 
         TR.ui.menu.register('tr_example:main', {
             title = 'Garage',
@@ -21,7 +22,7 @@
         TR.ui.textui.show('tr_example:shop', { key = TR.ui.keyOf('tr_example_open', 'E'), text = 'Open the shop' })
         TR.ui.textui.hide('tr_example:shop')
 
-    Item fields (label, onSelect, args, close) are documented in tr_ui/client/menu.lua.
+    Item fields (label, icon, onSelect, args, close) are documented in tr_ui/client/menu.lua.
 ]]
 
 ---@class TRUi
@@ -36,17 +37,27 @@ local function tr_ui(level)
     return exports.tr_ui
 end
 
+local RESOURCE = GetCurrentResourceName()
+-- A resource with a page of its own draws TR.ui there (tr_ui draws for itself through its exports).
+local ownPage = RESOURCE ~= 'tr_ui' and GetResourceMetadata(RESOURCE, 'ui_page', 0) ~= nil
+
 -- What this resource last sent tr_ui (or its own page), so calls made every frame that change nothing never cross
 -- over: a call into another resource copies its arguments over each time and costs far more than
 -- comparing them here. Forgotten when tr_ui (re)starts.
 local HUD_REFRESH = 1000 -- ms: the same HUD is sent again this often (another resource may have taken it)
 local sent = { hud = nil, hudAt = 0, loops = {}, texts = {} }
-local sounds -- this resource's own sound files, registered again when tr_ui restarts
+local sounds -- this resource's own sound files: on its page, else registered again when tr_ui restarts
+
+---Whether a sound plays on this resource's page: one it ships, when it has a page.
+local function onPage(name) return ownPage and sounds ~= nil and sounds[name] ~= nil end
 
 AddEventHandler('onClientResourceStart', function(name)
     if name ~= 'tr_ui' then return end
-    sent.hud, sent.loops, sent.texts = nil, {}, {}
-    if sounds then exports.tr_ui:registerSounds(sounds) end
+    sent.hud, sent.texts = nil, {}
+    for id, l in pairs(sent.loops) do
+        if not onPage(l.name) then sent.loops[id] = nil end
+    end
+    if sounds and not ownPage then exports.tr_ui:registerSounds(sounds) end
 end)
 
 local function copy(v)
@@ -66,11 +77,9 @@ end
 
 -- This resource's own page --------------------------------------------------------------------------
 -- The same calls as tr_ui's exports, sent to this resource's page instead. NUI names it takes on that
--- page: messages menu:open, menu:close, hud:set, hud:hide, hud:flash, textui:show, textui:hide, tr:hello;
--- callbacks tr:ready, menu:select, menu:close. The page's own code mustn't use them.
-
-local RESOURCE = GetCurrentResourceName()
-local ownPage = RESOURCE ~= 'tr_ui' and GetResourceMetadata(RESOURCE, 'ui_page', 0) ~= nil
+-- page: messages menu:open, menu:close, hud:set, hud:hide, hud:flash, textui:show, textui:hide,
+-- sound:register, sound:play, sound:loop, sound:stop, tr:hello; callbacks tr:ready, menu:select,
+-- menu:close. The page's own code mustn't use them.
 
 local page = {}
 local pageReady, pageQueue = false, {}
@@ -110,7 +119,9 @@ function page:showMenu(id)
     if not menu then return TR.log.error('menu "%s" is not registered', id) end
 
     local items = {}
-    for i, item in ipairs(menu.items) do items[i] = { label = tostring(item.label) } end
+    for i, item in ipairs(menu.items) do
+        items[i] = { label = tostring(item.label), icon = type(item.icon) == 'string' and item.icon or nil }
+    end
 
     openMenu = id
     toPage('menu:open', { id = id, title = menu.title, items = items })
@@ -154,6 +165,36 @@ function page:hideTextUI(id)
 end
 
 function page:isTextUIShown(id) return prompts[id] == true end
+
+local AUDIO = { ogg = true, wav = true, mp3 = true, flac = true, opus = true, webm = true }
+
+---The page fetches the files from this resource (https://cfx-nui-<resource>/<file>).
+function page:registerSounds(list)
+    local out = {}
+    for name, sound in pairs(list) do
+        local files = {}
+        if type(name) == 'string' and type(sound) == 'table' and type(sound.files) == 'table' then
+            for _, file in ipairs(sound.files) do
+                local ext = type(file) == 'string' and not file:find('..', 1, true) and file:match('%.(%w+)$')
+                if ext and AUDIO[ext:lower()] then files[#files + 1] = file end
+            end
+        end
+        if #files > 0 then
+            out[name] = { files = files, level = tonumber(sound.level), variance = tonumber(sound.variance), loop = sound.loop == true }
+        else
+            TR.log.warn('sound %s has no audio files it can play', tostring(name))
+        end
+    end
+    toPage('sound:register', { resource = RESOURCE, sounds = out })
+end
+
+function page:playSound(name, volume) toPage('sound:play', { name = name, volume = tonumber(volume) }) end
+
+function page:loopSound(id, name, params, volume)
+    toPage('sound:loop', { id = id, name = name, params = params, volume = tonumber(volume) })
+end
+
+function page:stopSound(id) toPage('sound:stop', { id = id }) end
 
 if ownPage then
     -- The page says it's loaded when it mounts, and again when asked: this file may load after it did.
@@ -273,8 +314,15 @@ function ui.keyOf(command, fallback)
 end
 
 ---Sound effects: tr_ui's own (names in tr_ui/client/sound.lua) and the ones a resource ships (register).
+---A resource with its own page plays the ones it ships there, without tr_ui; tr_ui's own need tr_ui.
 ---@class TRUiSound
 ui.sound = {}
+
+---Where a sound plays: this resource's page (one it ships), else tr_ui.
+local function player(name)
+    if onPage(name) then return page end
+    return tr_ui(4)
+end
 
 ---Sound files that ship with this resource, played with play / loop like tr_ui's own. Call it once
 ---when the resource starts; list the files in your fxmanifest `files`. Give the names a prefix of
@@ -292,12 +340,13 @@ ui.sound = {}
 ---@param list table<string, { files: string[], level?: number, variance?: number, loop?: boolean }>
 function ui.sound.register(list)
     sounds = list
+    if ownPage then return page:registerSounds(list) end
     tr_ui():registerSounds(list)
 end
 
 ---@param name string
 ---@param volume? number 0..1
-function ui.sound.play(name, volume) tr_ui():playSound(name, volume) end
+function ui.sound.play(name, volume) player(name):playSound(name, volume) end
 
 ---Starts a loop or updates its params; call every frame while it should play.
 ---@param id string
@@ -308,14 +357,15 @@ function ui.sound.loop(id, name, params, volume)
     local last = sent.loops[id]
     if last and last.name == name and last.volume == volume and same(params, last.params) then return end
     sent.loops[id] = { name = name, volume = volume, params = copy(params) }
-    tr_ui():loopSound(id, name, params, volume)
+    player(name):loopSound(id, name, params, volume)
 end
 
 ---@param id string
 function ui.sound.stop(id)
-    if not sent.loops[id] then return end
+    local last = sent.loops[id]
+    if not last then return end
     sent.loops[id] = nil
-    tr_ui():stopSound(id)
+    player(last.name):stopSound(id)
 end
 
 local probes, listening = {}, false
