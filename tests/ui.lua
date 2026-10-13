@@ -138,6 +138,39 @@ check('own: stopped once', count('sound:stop') == 1 and T.lastNui('sound:stop').
 local okTick, tickErr = pcall(TR.ui.sound.play, 'tick')
 check('own: tr_ui\'s own sounds still need tr_ui', not okTick and tostring(tickErr):find('tr_ui is not running', 1, true) ~= nil)
 
+-- Sounds the page plays with code of its own need no files.
+TR.ui.sound.register({ fr_hum = { custom = true }, fr_empty = {} })
+reg = T.lastNui('sound:register')
+check('own: a custom sound is registered without files', reg.data.sounds.fr_hum ~= nil and reg.data.sounds.fr_hum.custom == true
+    and #reg.data.sounds.fr_hum.files == 0 and reg.data.sounds.fr_empty == nil)
+TR.ui.sound.play('fr_hum', 0.4)
+check('own: and played on its page', T.lastNui('sound:play').data.name == 'fr_hum' and T.lastNui('sound:play').data.volume == 0.4)
+
+-- Frame probes are read on its page too.
+do
+    local savedPromise, savedCitizen = promise, Citizen
+    promise = { new = function() return { resolve = function(self, value) self.value, self.done = value, true end } end }
+    Citizen = { Await = function(p) return p end }
+
+    local first = TR.ui.probeFrame({ 0.25, 0.5 })
+    local probe = T.lastNui('capture:probe')
+    check('own: a frame probe goes to its page', T.nuiCallbacks['capture:result'] ~= nil and probe ~= nil
+        and probe.data.id == 1 and probe.data.points[1] == 0.25 and probe.data.points[2] == 0.5 and not first.done)
+    T.nui('capture:result', { id = 1.0, hits = '1' })
+    check('own: its answer comes back (float id)', first.done and first.value == '1')
+    T.nui('capture:result', { id = 1, hits = '0' })
+    check('own: an answer twice changes nothing', first.value == '1')
+
+    local second = TR.ui.probeFrame({ 0.1, 0.1 })
+    check('own: probes are numbered', T.lastNui('capture:probe').data.id == 2)
+    T.nui('capture:result', { id = 2 })
+    check('own: a frame that couldn\'t be read is false', second.done and second.value == false)
+    T.nui('capture:result', 'junk')
+    T.nui('capture:result', { id = 'x', hits = '1' })
+
+    promise, Citizen = savedPromise, savedCitizen
+end
+
 TR.ui.menu.show('tr_fraud:atm')
 for _, fn in ipairs(T.handlers.onResourceStop or {}) do fn('tr_fraud') end
 check('own: stopping with the menu open gives focus back', T.focus[1] == false)

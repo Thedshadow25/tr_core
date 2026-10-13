@@ -4,7 +4,7 @@
     A resource with its own page (ui_page in its fxmanifest) gets its menus, HUD and prompts drawn there:
     the page mounts <Overlays /> from @tr/ui (dev/ui-kit), and the resource doesn't need tr_ui. Resources
     without a page use tr_ui's. The sounds a resource ships (TR.ui.sound.register) play on its own page
-    too; tr_ui's own sounds and probeFrame always come from tr_ui.
+    too, and probeFrame reads the frame there; tr_ui's own sounds always come from tr_ui.
 
         TR.ui.menu.register('tr_example:main', {
             title = 'Garage',
@@ -78,8 +78,8 @@ end
 -- This resource's own page --------------------------------------------------------------------------
 -- The same calls as tr_ui's exports, sent to this resource's page instead. NUI names it takes on that
 -- page: messages menu:open, menu:close, hud:set, hud:hide, hud:flash, textui:show, textui:hide,
--- sound:register, sound:play, sound:loop, sound:stop, tr:hello; callbacks tr:ready, menu:select,
--- menu:close. The page's own code mustn't use them.
+-- sound:register, sound:play, sound:loop, sound:stop, capture:probe, tr:hello; callbacks tr:ready,
+-- menu:select, menu:close, capture:result. The page's own code mustn't use them.
 
 local page = {}
 local pageReady, pageQueue = false, {}
@@ -168,12 +168,16 @@ function page:isTextUIShown(id) return prompts[id] == true end
 
 local AUDIO = { ogg = true, wav = true, mp3 = true, flac = true, opus = true, webm = true }
 
----The page fetches the files from this resource (https://cfx-nui-<resource>/<file>).
+---The page fetches the files from this resource (https://cfx-nui-<resource>/<file>). A sound marked
+---custom has none: the page plays it with code of its own.
 function page:registerSounds(list)
     local out = {}
     for name, sound in pairs(list) do
         local files = {}
-        if type(name) == 'string' and type(sound) == 'table' and type(sound.files) == 'table' then
+        local custom = type(name) == 'string' and type(sound) == 'table' and sound.custom == true
+        if custom then
+            out[name] = { files = files, custom = true }
+        elseif type(name) == 'string' and type(sound) == 'table' and type(sound.files) == 'table' then
             for _, file in ipairs(sound.files) do
                 local ext = type(file) == 'string' and not file:find('..', 1, true) and file:match('%.(%w+)$')
                 if ext and AUDIO[ext:lower()] then files[#files + 1] = file end
@@ -181,7 +185,7 @@ function page:registerSounds(list)
         end
         if #files > 0 then
             out[name] = { files = files, level = tonumber(sound.level), variance = tonumber(sound.variance), loop = sound.loop == true }
-        else
+        elseif not custom then
             TR.log.warn('sound %s has no audio files it can play', tostring(name))
         end
     end
@@ -195,6 +199,23 @@ function page:loopSound(id, name, params, volume)
 end
 
 function page:stopSound(id) toPage('sound:stop', { id = id }) end
+
+local probes, nextProbe = {}, 0 ---@type table<integer, promise>, integer
+
+---A frame probe's answer, from tr_ui or this resource's page.
+local function probed(id, hits)
+    local p = probes[id]
+    if not p then return end
+    probes[id] = nil
+    p:resolve(hits)
+end
+
+---Asks the page to look at the game's frame. Returns the probe's id; capture:result brings the answer.
+function page:probeFrame(points)
+    nextProbe = nextProbe + 1
+    toPage('capture:probe', { id = nextProbe, points = points })
+    return nextProbe
+end
 
 if ownPage then
     -- The page says it's loaded when it mounts, and again when asked: this file may load after it did.
@@ -220,6 +241,12 @@ if ownPage then
     RegisterNUICallback('menu:close', function(_, cb)
         cb({})
         page:hideMenu()
+    end)
+
+    RegisterNUICallback('capture:result', function(data, cb)
+        cb({})
+        local id = type(data) == 'table' and tonumber(data.id)
+        if id then probed(math.tointeger(id) or id, type(data.hits) == 'string' and data.hits or false) end
     end)
 
     -- Stopping with the menu open mustn't leave the mouse stuck on a page that's gone.
@@ -337,7 +364,10 @@ end
 ---files: one is picked at random each time it plays. level: 0..1, how loud (default 0.7).
 ---variance: a small random pitch change so repeats don't sound copied (e.g. 0.05).
 ---loop: play it with sound.loop; params.level 0..1 sets its volume.
----@param list table<string, { files: string[], level?: number, variance?: number, loop?: boolean }>
+---custom: true for a sound the resource's own page plays with code of its own (one made live, or a
+---loop that follows its params its own way). It needs no files: the page hears sound:play, sound:loop
+---and sound:stop for it, and mounts <Overlays sounds={false} /> so they aren't answered twice.
+---@param list table<string, { files?: string[], level?: number, variance?: number, loop?: boolean, custom?: boolean }>
 function ui.sound.register(list)
     sounds = list
     if ownPage then return page:registerSounds(list) end
@@ -368,26 +398,21 @@ function ui.sound.stop(id)
     player(last.name):stopSound(id)
 end
 
-local probes, listening = {}, false
+local listening = false
 
 ---Which screen points show a magenta marker (DrawMarker 255, 0, 255) in the current game frame.
----Waits a frame or two for the answer. Keep drawing the markers until it returns.
+---Waits a frame or two for the answer. Keep drawing the markers until it returns. Read on this
+---resource's page when it has one (<Overlays /> answers), else by tr_ui.
 ---@param points number[] flat x, y pairs, 0..1 from the top left (GetScreenCoordFromWorldCoord)
 ---@param timeout? integer ms, default 2000
 ---@return string|false hits '1' / '0' per point, or false if the frame couldn't be read
 function ui.probeFrame(points, timeout)
-    if not listening then
+    if not ownPage and not listening then
         listening = true
-        AddEventHandler('tr_ui:frameProbed', function(id, hits)
-            local p = probes[id]
-            if p then
-                probes[id] = nil
-                p:resolve(hits)
-            end
-        end)
+        AddEventHandler('tr_ui:frameProbed', probed)
     end
 
-    local id = tr_ui():probeFrame(points)
+    local id = backend():probeFrame(points)
     local p = promise.new()
     probes[id] = p
     SetTimeout(timeout or 2000, function()
